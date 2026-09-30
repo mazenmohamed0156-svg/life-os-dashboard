@@ -1,0 +1,211 @@
+module.exports = async function handler(req, res) {
+  const NOTION_API_KEY = process.env.NOTION_API_KEY;
+
+  if (!NOTION_API_KEY) {
+    return res.status(400).json({ 
+      success: false,
+      error: 'NOTION_API_KEY not configured',
+      source: 'validation'
+    });
+  }
+
+  if (req.method === 'POST') {
+    return handleQuery(req, res, NOTION_API_KEY);
+  } else if (req.method === 'PATCH') {
+    return handleUpdate(req, res, NOTION_API_KEY);
+  } else {
+    return res.status(405).json({ 
+      success: false,
+      error: 'Method not allowed',
+      source: 'validation'
+    });
+  }
+};
+
+async function handleQuery(req, res, NOTION_API_KEY) {
+  try {
+    const { databaseId, filter, sorts } = req.body;
+
+    // Validation
+    if (!databaseId || typeof databaseId !== 'string' || databaseId.trim().length === 0) {
+      return res.status(200).json({ 
+        success: false,
+        source: 'validation',
+        error: 'Missing or invalid databaseId'
+      });
+    }
+
+    if (filter !== undefined && filter !== null && typeof filter !== 'object') {
+      return res.status(200).json({ 
+        success: false,
+        source: 'validation',
+        error: 'Invalid filter - must be object or null'
+      });
+    }
+
+    if (sorts !== undefined && (!Array.isArray(sorts))) {
+      return res.status(200).json({ 
+        success: false,
+        source: 'validation',
+        error: 'Invalid sorts - must be array'
+      });
+    }
+
+    const payload = {};
+    if (filter) payload.filter = filter;
+    if (sorts) payload.sorts = sorts;
+
+    // Call Notion API
+    console.log(`[Notion] Querying database: ${databaseId}`);
+    
+    const response = await fetch(
+      `https://api.notion.com/v1/databases/${databaseId}/query`,
+      {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${NOTION_API_KEY}`,
+          'Notion-Version': '2022-06-28',
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(payload)
+      }
+    );
+
+    console.log(`[Notion] Response status: ${response.status}`);
+
+    // Handle errors
+    if (!response.ok) {
+      let notionMessage = '';
+      try {
+        const errorData = await response.json();
+        notionMessage = errorData.message || '';
+      } catch (e) {
+        notionMessage = '';
+      }
+
+      const errorMap = {
+        400: 'Bad request - check database ID or filter format',
+        401: 'API key is invalid or expired',
+        403: 'Integration does not have access to this database',
+        404: 'Database not found - ID may be incorrect',
+        429: 'Rate limited - too many requests',
+        500: 'Notion server error',
+        502: 'Notion gateway error',
+        503: 'Notion service unavailable'
+      };
+
+      console.error(`[Notion Error] Database ${databaseId}: ${response.status} - ${errorMap[response.status]}`);
+
+      return res.status(200).json({
+        success: false,
+        source: 'notion',
+        database: databaseId,
+        status: response.status,
+        error: errorMap[response.status] || 'Unknown Notion error',
+        notionMessage: notionMessage || undefined
+      });
+    }
+
+    // Success
+    const data = await response.json();
+    console.log(`[Notion] Success: ${databaseId} returned ${(data.results || []).length} records`);
+    
+    return res.status(200).json({
+      success: true,
+      data: data.results || []
+    });
+
+  } catch (error) {
+    console.error('[Notion Query Exception]', error.message);
+    return res.status(200).json({
+      success: false,
+      source: 'client',
+      error: error.message || 'Network error or timeout'
+    });
+  }
+}
+
+async function handleUpdate(req, res, NOTION_API_KEY) {
+  try {
+    const { pageId, properties } = req.body;
+
+    // Validation
+    if (!pageId || typeof pageId !== 'string' || pageId.trim().length === 0) {
+      return res.status(200).json({ 
+        success: false,
+        source: 'validation',
+        error: 'Missing or invalid pageId'
+      });
+    }
+
+    if (!properties || typeof properties !== 'object' || Array.isArray(properties)) {
+      return res.status(200).json({ 
+        success: false,
+        source: 'validation',
+        error: 'Invalid properties - must be object'
+      });
+    }
+
+    // Call Notion API
+    console.log(`[Notion] Updating page: ${pageId}`);
+    
+    const response = await fetch(
+      `https://api.notion.com/v1/pages/${pageId}`,
+      {
+        method: 'PATCH',
+        headers: {
+          'Authorization': `Bearer ${NOTION_API_KEY}`,
+          'Notion-Version': '2022-06-28',
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ properties })
+      }
+    );
+
+    console.log(`[Notion] Update response status: ${response.status}`);
+
+    if (!response.ok) {
+      let notionMessage = '';
+      try {
+        const errorData = await response.json();
+        notionMessage = errorData.message || '';
+      } catch (e) {
+        notionMessage = '';
+      }
+
+      const errorMap = {
+        400: 'Bad request - check properties format',
+        401: 'API key is invalid or expired',
+        403: 'Integration does not have permission to update this page',
+        404: 'Page not found - ID may be incorrect',
+        429: 'Rate limited - too many requests',
+        500: 'Notion server error',
+        502: 'Notion gateway error',
+        503: 'Notion service unavailable'
+      };
+
+      console.error(`[Notion Error] Page ${pageId}: ${response.status} - ${errorMap[response.status]}`);
+
+      return res.status(200).json({
+        success: false,
+        source: 'notion',
+        page: pageId,
+        status: response.status,
+        error: errorMap[response.status] || 'Unknown Notion error',
+        notionMessage: notionMessage || undefined
+      });
+    }
+
+    // Success
+    console.log(`[Notion] Page ${pageId} updated successfully`);
+    return res.status(200).json({ success: true });
+
+  } catch (error) {
+    console.error('[Notion Update Exception]', error.message);
+    return res.status(200).json({
+      success: false,
+      source: 'client',
+      error: error.message || 'Network error or timeout'
+    });
+  }
+}
