@@ -1152,34 +1152,51 @@
         }
 
         // Fetch from Notion API
-        // Returns: { success: true, data: [...] } or { success: false, error: '...' }
-        async function fetchNotionData(databaseId, filter = null) {
+        // Returns: { success: true, data: [...] } or { success: false, error: '...', source: '...' }
+        async function fetchNotionData(databaseId, databaseName = 'Unknown') {
             try {
+                console.log(`[Dashboard] Loading ${databaseName}...`);
+                
                 if (!databaseId || typeof databaseId !== 'string') {
+                    console.error(`[Dashboard] ${databaseName} → FAIL: Invalid database ID`);
                     return { success: false, error: 'Invalid database ID' };
                 }
 
                 const response = await fetch(API_URL, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ databaseId, filter })
+                    body: JSON.stringify({ databaseId, filter: null })
                 });
 
-                if (!response.ok) {
-                    const errorData = await response.json().catch(() => ({}));
+                const data = await response.json();
+
+                // Check if API returned an error
+                if (!data.success) {
+                    console.error(`[Dashboard] ${databaseName} → FAIL`);
+                    console.error(`  └─ Source: ${data.source}`);
+                    console.error(`  └─ Error: ${data.error}`);
+                    if (data.status) console.error(`  └─ HTTP Status: ${data.status}`);
+                    if (data.notionMessage) console.error(`  └─ Notion: ${data.notionMessage}`);
+                    
                     return { 
                         success: false, 
-                        error: errorData.error || `Connection failed (${response.status})`
+                        error: data.error,
+                        source: data.source,
+                        status: data.status,
+                        databaseName: databaseName
                     };
                 }
 
-                const data = await response.json();
-                return { success: true, data: data };
+                console.log(`[Dashboard] ${databaseName} → SUCCESS (${(data.data || []).length} records)`);
+                return { success: true, data: data.data };
+
             } catch (error) {
-                console.error('Fetch error:', error);
+                console.error(`[Dashboard] ${databaseName} → EXCEPTION: ${error.message}`);
                 return { 
                     success: false, 
-                    error: 'Unable to connect to Notion'
+                    error: 'Network error',
+                    source: 'client',
+                    databaseName: databaseName
                 };
             }
         }
@@ -1187,6 +1204,8 @@
         // Update Notion Page
         async function updateNotionPage(pageId, properties) {
             try {
+                console.log(`[Update] Updating page ${pageId}...`);
+                
                 const response = await fetch(API_URL, {
                     method: 'PATCH',
                     headers: { 'Content-Type': 'application/json' },
@@ -1195,14 +1214,17 @@
                 
                 const data = await response.json();
                 
-                if (!response.ok) {
-                    // API returned error with safe message
+                if (!data.success) {
+                    console.error(`[Update] Failed: ${data.error}`);
+                    if (data.source) console.error(`  └─ Source: ${data.source}`);
+                    if (data.status) console.error(`  └─ Status: ${data.status}`);
                     return { success: false, error: data.error || 'Update failed' };
                 }
                 
+                console.log(`[Update] Success for page ${pageId}`);
                 return { success: true };
             } catch (error) {
-                console.error('Update error:', error);
+                console.error('[Update] Exception:', error.message);
                 return { success: false, error: 'Unable to update Notion' };
             }
         }
@@ -1554,42 +1576,60 @@
         // Initialize Dashboard
         async function initDashboard() {
             try {
+                console.log('[Dashboard] Starting initialization...');
                 updateHeader();
                 const today = getToday();
 
                 const results = await Promise.all([
-                    fetchNotionData(DATABASES.tasks, {
-                        property: 'Date',
-                        date: { equals: today }
-                    }),
-                    fetchNotionData(DATABASES.habits),
-                    fetchNotionData(DATABASES.goals),
-                    fetchNotionData(DATABASES.xpProgress),
-                    fetchNotionData(DATABASES.dailyLog)
+                    fetchNotionData(DATABASES.tasks, 'Tasks'),
+                    fetchNotionData(DATABASES.habits, 'Habits'),
+                    fetchNotionData(DATABASES.goals, 'Goals'),
+                    fetchNotionData(DATABASES.xpProgress, 'XP/Progress'),
+                    fetchNotionData(DATABASES.dailyLog, 'Daily Log')
                 ]);
 
-                // Check for critical API failures
                 const [tasksResult, habitsResult, goalsResult, xpResult, dailyLogResult] = results;
                 
-                // If daily log fails, we can't load progress - show error
+                // Log results summary
+                console.log('[Dashboard] Results:');
+                console.log(`  - Tasks: ${tasksResult.success ? 'OK' : 'FAIL - ' + tasksResult.error}`);
+                console.log(`  - Habits: ${habitsResult.success ? 'OK' : 'FAIL - ' + habitsResult.error}`);
+                console.log(`  - Goals: ${goalsResult.success ? 'OK' : 'FAIL - ' + goalsResult.error}`);
+                console.log(`  - XP/Progress: ${xpResult.success ? 'OK' : 'FAIL - ' + xpResult.error}`);
+                console.log(`  - Daily Log: ${dailyLogResult.success ? 'OK' : 'FAIL - ' + dailyLogResult.error}`);
+
+                // Critical failures that block everything
                 if (!dailyLogResult.success) {
-                    showError(dailyLogResult.error);
+                    console.error('[Dashboard] CRITICAL: Daily Log failed');
+                    showError(`Daily Log Error: ${dailyLogResult.error}`);
                     return;
                 }
 
-                // If other critical data fails, show error
                 if (!xpResult.success) {
-                    showError(xpResult.error);
+                    console.error('[Dashboard] CRITICAL: XP/Progress failed');
+                    showError(`XP Error: ${xpResult.error}`);
                     return;
                 }
 
-                // Extract data arrays (empty if database is empty, error already shown)
+                // Non-critical failures show warning but continue
+                if (!tasksResult.success) {
+                    console.warn('[Dashboard] Tasks failed but continuing:', tasksResult.error);
+                }
+                if (!habitsResult.success) {
+                    console.warn('[Dashboard] Habits failed but continuing:', habitsResult.error);
+                }
+                if (!goalsResult.success) {
+                    console.warn('[Dashboard] Goals failed but continuing:', goalsResult.error);
+                }
+
+                // Extract data arrays
                 const tasksData = tasksResult.success ? tasksResult.data : [];
                 const habitsData = habitsResult.success ? habitsResult.data : [];
                 const goalsData = goalsResult.success ? goalsResult.data : [];
                 const xpData = xpResult.data || [];
                 const dailyLogData = dailyLogResult.data || [];
 
+                console.log('[Dashboard] Rendering components...');
                 await updateTodayTasks(tasksData);
                 await updateHabits(habitsData, dailyLogData, today);
                 await updateProgress(tasksData, xpData, dailyLogData, today);
@@ -1597,10 +1637,13 @@
                 await updateWeekly(dailyLogData);
                 await updateGoals(goalsData);
 
+                console.log('[Dashboard] Initialization complete');
+
             } catch (error) {
-                console.error('Dashboard error:', error);
-                showError('Unable to load dashboard');
+                console.error('[Dashboard] EXCEPTION:', error);
+                showError('Dashboard initialization failed: ' + error.message);
             }
+        }
         }
 
         function showError(message) {
